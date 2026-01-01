@@ -1,5 +1,5 @@
 """
-Placo-based movement recorder for Reachy Mini.
+Gravity compensation recorder for Reachy Mini.
 
 Features:
 - Gravity compensation mode (move robot by hand)
@@ -13,20 +13,28 @@ Requires: reachy_mini with placo_kinematics optional dependency
 
 import json
 import time
-import os
 import sys
 from datetime import datetime
+from enum import Enum, auto
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import numpy as np
 
 from reachy_mini import ReachyMini
-from reachy_mini.utils import create_head_pose
+
+
+class RobotState(Enum):
+    """Current state of the robot."""
+    DISCONNECTED = auto()
+    MOTORS_ENABLED = auto()
+    GRAVITY_COMP = auto()
+    MOTORS_DISABLED = auto()
+    SLEEPING = auto()
 
 
 class ReachyRecorder:
-    """Interactive recorder for Reachy Mini using Placo kinematics."""
+    """Gravity compensation recorder for Reachy Mini."""
 
     def __init__(self):
         self.reachy: Optional[ReachyMini] = None
@@ -34,223 +42,244 @@ class ReachyRecorder:
         self.recordings_dir.mkdir(exist_ok=True)
         self.current_recording: Optional[List[Dict[str, Any]]] = None
         self.is_recording = False
+        self.state = RobotState.DISCONNECTED
+
+    def _require_connected(self) -> bool:
+        """Return True if connected, print error and return False if not."""
+        if self.state == RobotState.DISCONNECTED:
+            print("ERROR: Not connected. Use 'c' first.")
+            return False
+        return True
+
+    def _require_pliable(self) -> bool:
+        """Ensure robot is pliable (gravity comp or motors disabled). Auto-enable if needed."""
+        if not self._require_connected():
+            return False
+        if self.state in (RobotState.GRAVITY_COMP, RobotState.MOTORS_DISABLED):
+            return True
+        print("Enabling gravity compensation...")
+        try:
+            self.reachy.enable_gravity_compensation()
+            self.reachy.disable_motors(ids=["right_antenna", "left_antenna"])
+            self.state = RobotState.GRAVITY_COMP
+            print("Robot is now pliable.")
+            time.sleep(0.2)
+            return True
+        except Exception as e:
+            print(f"ERROR enabling gravity comp: {e}")
+            return False
 
     def connect(self) -> bool:
         """Connect to Reachy Mini."""
+        if self.state != RobotState.DISCONNECTED:
+            print("Already connected.")
+            return True
         try:
-            print("Connecting to Reachy Mini...")
-            self.reachy = ReachyMini(
-                media_backend="no_media",
-            )
+            print("Connecting...")
+            self.reachy = ReachyMini(media_backend="no_media")
             self.reachy.__enter__()
-            print("Connected! Ready for gravity compensation.")
+            self.state = RobotState.MOTORS_ENABLED
+            print("Connected.")
             return True
         except Exception as e:
-            print(f"Failed to connect: {e}")
+            print(f"ERROR: {e}")
+            self.reachy = None
             return False
 
     def disconnect(self):
         """Disconnect from Reachy Mini."""
+        if self.is_recording:
+            self.is_recording = False
         if self.reachy:
             try:
                 self.reachy.__exit__(None, None, None)
             except:
                 pass
             self.reachy = None
-            print("Disconnected.")
+        self.state = RobotState.DISCONNECTED
+        print("Disconnected.")
 
     def wake_up(self):
         """Wake up the robot to neutral position."""
-        if not self.reachy:
-            print("Not connected!")
+        if not self._require_connected():
             return
-        print("Waking up...")
-        self.reachy.wake_up()
-        print("Robot is awake and ready.")
+        try:
+            print("Waking up...")
+            self.reachy.enable_motors()
+            self.reachy.wake_up()
+            self.state = RobotState.MOTORS_ENABLED
+            print("Robot at neutral position.")
+        except Exception as e:
+            print(f"ERROR: {e}")
 
     def go_to_sleep(self):
         """Put robot to sleep position."""
-        if not self.reachy:
-            print("Not connected!")
+        if not self._require_connected():
             return
-        print("Re-enabling motors...")
-        self.reachy.enable_motors()
-        print("Going to sleep...")
-        self.reachy.goto_sleep()
-        print("Robot is asleep.")
+        try:
+            print("Going to sleep...")
+            self.reachy.enable_motors()
+            time.sleep(0.1)
+            self.reachy.goto_sleep()
+            self.state = RobotState.SLEEPING
+            print("Robot asleep.")
+        except Exception as e:
+            print(f"ERROR: {e}")
 
     def enable_gravity_comp(self):
-        """Enable gravity compensation mode - robot becomes compliant."""
-        if not self.reachy:
-            print("Not connected!")
+        """Enable gravity compensation - robot becomes pliable."""
+        if not self._require_connected():
             return
-        print("Enabling gravity compensation...")
-        self.reachy.enable_gravity_compensation()
-        # Disable antenna motors so they're pliable too
-        self.reachy.disable_motors(ids=["right_antenna", "left_antenna"])
-        print("Gravity compensation ENABLED. Head + antennas are pliable.")
+        try:
+            print("Enabling gravity compensation...")
+            self.reachy.enable_gravity_compensation()
+            self.reachy.disable_motors(ids=["right_antenna", "left_antenna"])
+            self.state = RobotState.GRAVITY_COMP
+            print("Head + antennas are now pliable.")
+        except Exception as e:
+            print(f"ERROR: {e}")
 
     def enable_motors(self):
         """Re-enable motor control (exit gravity comp mode)."""
-        if not self.reachy:
-            print("Not connected!")
+        if not self._require_connected():
             return
-        print("Enabling motor control...")
-        self.reachy.enable_motors()
-        print("Motor control ENABLED. Robot holds position.")
+        try:
+            print("Enabling motors...")
+            self.reachy.enable_motors()
+            self.state = RobotState.MOTORS_ENABLED
+            print("Motors enabled. Robot holds position.")
+        except Exception as e:
+            print(f"ERROR: {e}")
 
     def disable_motors(self):
-        """Disable all motors - robot goes limp."""
-        if not self.reachy:
-            print("Not connected!")
+        """Disable all motors - robot goes completely limp."""
+        if not self._require_connected():
             return
-        print("Disabling motors...")
-        self.reachy.disable_motors()
-        print("Motors DISABLED. Robot is limp.")
-
-    def start_recording(self):
-        """Start recording robot movements."""
-        if not self.reachy:
-            print("Not connected!")
-            return
-        if self.is_recording:
-            print("Already recording!")
-            return
-
-        print("Starting recording...")
-        print("Move the robot! Press Enter to stop recording.")
-        self.reachy.start_recording()
-        self.is_recording = True
-        print("RECORDING... (move the robot now)")
-
-    def stop_recording(self) -> Optional[List[Dict[str, Any]]]:
-        """Stop recording and return the recorded data."""
-        if not self.reachy:
-            print("Not connected!")
-            return None
-        if not self.is_recording:
-            print("Not currently recording!")
-            return None
-
-        print("Stopping recording...")
-        self.is_recording = False
-
         try:
-            data = self.reachy.stop_recording()
-            if data:
-                self.current_recording = data
-                duration = len(data) * 0.02  # ~50Hz recording
-                print(f"Recording stopped! Captured {len(data)} frames ({duration:.1f}s)")
-                return data
-            else:
-                print("No data recorded.")
-                return None
+            print("Disabling all motors...")
+            self.reachy.disable_motors()
+            self.state = RobotState.MOTORS_DISABLED
+            print("All motors disabled. Robot is limp.")
         except Exception as e:
-            print(f"Error stopping recording: {e}")
+            print(f"ERROR: {e}")
+
+    def record(self, duration: float = 5.0, frequency: float = 50.0):
+        """Record robot positions for specified duration."""
+        if not self._require_pliable():
+            return None
+        if self.is_recording:
+            print("ERROR: Already recording!")
             return None
 
-    def manual_record(self, duration: float = 5.0, frequency: float = 50.0):
-        """
-        Manually record by polling current positions.
-        Useful if daemon recording isn't working.
-        """
-        if not self.reachy:
-            print("Not connected!")
-            return
-
-        print(f"Manual recording for {duration}s at {frequency}Hz...")
-        print("Move the robot! Recording starts NOW.")
+        self.is_recording = True
+        print(f"\n>>> RECORDING {duration}s <<<")
+        print(">>> Move the robot NOW <<<\n")
 
         frames = []
         start_time = time.time()
         interval = 1.0 / frequency
-
-        while (time.time() - start_time) < duration:
-            loop_start = time.time()
-
-            try:
-                head_pose = self.reachy.get_current_head_pose()
-                head_joints, antenna_joints = self.reachy.get_current_joint_positions()
-
-                frame = {
-                    "time": time.time() - start_time,
-                    "head": head_pose.tolist(),
-                    "antennas": list(antenna_joints),
-                    "head_joints": list(head_joints),
-                    "body_yaw": head_joints[0] if head_joints else 0.0,
-                }
-                frames.append(frame)
-            except Exception as e:
-                print(f"Error reading position: {e}")
-
-            # Maintain loop frequency
-            elapsed = time.time() - loop_start
-            sleep_time = interval - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-        self.current_recording = frames
-        print(f"Recorded {len(frames)} frames ({duration:.1f}s)")
-        return frames
-
-    def playback(self, recording: Optional[List[Dict[str, Any]]] = None, speed: float = 1.0):
-        """Play back a recorded movement."""
-        if not self.reachy:
-            print("Not connected!")
-            return
-
-        data = recording or self.current_recording
-        if not data:
-            print("No recording to play back!")
-            return
-
-        print(f"Playing back {len(data)} frames at {speed}x speed...")
-        print("Press Ctrl+C to stop.")
-
-        # Make sure motors are enabled
-        self.reachy.enable_motors()
-        time.sleep(0.1)
+        last_sec = -1
 
         try:
-            # Go to starting position first
-            first_frame = data[0]
-            if "head" in first_frame:
-                head_pose = np.array(first_frame["head"])
-                antennas = first_frame.get("antennas", [0.0, 0.0])
-                print("Moving to start position...")
-                self.reachy.goto_target(head=head_pose, antennas=antennas, duration=1.0)
+            while (time.time() - start_time) < duration:
+                loop_start = time.time()
+                elapsed = loop_start - start_time
 
-            # Play through frames
+                # Progress each second
+                sec = int(elapsed)
+                if sec > last_sec:
+                    last_sec = sec
+                    print(f"  {duration - sec:.0f}s remaining...")
+
+                try:
+                    head_pose = self.reachy.get_current_head_pose()
+                    head_joints, antenna_joints = self.reachy.get_current_joint_positions()
+                    frame = {
+                        "time": elapsed,
+                        "head": head_pose.tolist(),
+                        "antennas": list(antenna_joints),
+                        "body_yaw": head_joints[0] if len(head_joints) > 0 else 0.0,
+                    }
+                    frames.append(frame)
+                except Exception as e:
+                    pass  # Skip read errors silently
+
+                sleep_time = interval - (time.time() - loop_start)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        except KeyboardInterrupt:
+            print("\n  Interrupted.")
+
+        self.is_recording = False
+
+        if not frames:
+            print("ERROR: No frames captured!")
+            return None
+
+        self.current_recording = frames
+        print(f"\nRecorded {len(frames)} frames ({frames[-1]['time']:.1f}s)")
+        return frames
+
+    def playback(self, speed: float = 1.0):
+        """Play back the current recording."""
+        if not self._require_connected():
+            return
+        if not self.current_recording:
+            print("ERROR: No recording. Use 'R' to record first.")
+            return
+        if speed <= 0 or speed > 10:
+            print("ERROR: Speed must be between 0 and 10.")
+            return
+
+        data = self.current_recording
+        duration = data[-1].get("time", len(data) * 0.02)
+        print(f"\nPlaying {len(data)} frames at {speed}x ({duration/speed:.1f}s)")
+
+        try:
+            print("Enabling motors...")
+            self.reachy.enable_motors()
+            self.state = RobotState.MOTORS_ENABLED
+            time.sleep(0.1)
+
+            # Go to start position
+            first = data[0]
+            if "head" in first:
+                print("Moving to start...")
+                self.reachy.goto_target(
+                    head=np.array(first["head"]),
+                    antennas=first.get("antennas", [0.0, 0.0]),
+                    duration=1.0
+                )
+                time.sleep(0.2)
+
+            print("Playing...")
             start_time = time.time()
-            frame_idx = 0
+            idx = 0
 
-            while frame_idx < len(data):
+            while idx < len(data):
                 elapsed = (time.time() - start_time) * speed
 
-                # Find the right frame for current time
-                while frame_idx < len(data) - 1 and data[frame_idx + 1].get("time", 0) < elapsed:
-                    frame_idx += 1
+                # Advance to correct frame
+                while idx < len(data) - 1 and data[idx + 1].get("time", 0) < elapsed:
+                    idx += 1
 
-                frame = data[frame_idx]
-
+                frame = data[idx]
                 if "head" in frame:
-                    head_pose = np.array(frame["head"])
-                    antennas = frame.get("antennas", [0.0, 0.0])
-                    body_yaw = frame.get("body_yaw", 0.0)
+                    try:
+                        self.reachy.set_target(
+                            head=np.array(frame["head"]),
+                            antennas=frame.get("antennas", [0.0, 0.0]),
+                            body_yaw=frame.get("body_yaw", 0.0)
+                        )
+                    except:
+                        pass
 
-                    self.reachy.set_target(
-                        head=head_pose,
-                        antennas=antennas,
-                        body_yaw=body_yaw
-                    )
-
-                # Check if we've played all frames
-                if frame_idx >= len(data) - 1:
+                if idx >= len(data) - 1:
                     break
+                time.sleep(0.01)
 
-                time.sleep(0.01)  # ~100Hz update rate
-
-            print("Playback complete!")
+            print("Playback complete.")
 
         except KeyboardInterrupt:
             print("\nPlayback interrupted.")
@@ -370,43 +399,35 @@ def interactive_menu():
 
     menu = """
 +-------------------------------------------------------+
-|         REACHY MINI GRAVITY COMP RECORDER             |
+|              REACHY POSEABLE                          |
 +-------------------------------------------------------+
-|  CONNECTION                                           |
-|    c  - Connect                                       |
-|    d  - Disconnect                                    |
+|  c - Connect       w - Wake up      s - Sleep         |
+|  d - Disconnect    g - Gravity comp m - Motors on     |
+|                    o - Motors off   p - Print pose    |
 |                                                       |
-|  ROBOT CONTROL                                        |
-|    w  - Wake up (go to neutral position)              |
-|    s  - Go to sleep                                   |
-|    g  - Enable GRAVITY COMPENSATION (move by hand)    |
-|    m  - Enable motor control (hold position)          |
-|    o  - Disable motors (go limp)                      |
-|    p  - Print current pose                            |
+|  R   - Record 5s   P   - Playback   S - Save          |
+|  R10 - Record 10s  P2  - Play 2x    L - Load          |
+|  R30 - Record 30s  P.5 - Play 0.5x  l - List files    |
 |                                                       |
-|  RECORDING                                            |
-|    r  - Start/stop daemon recording                   |
-|    R  - Manual record (5 seconds)                     |
-|    R10- Manual record (10 seconds, e.g. R10, R30)     |
-|                                                       |
-|  PLAYBACK                                             |
-|    P  - Playback current recording                    |
-|    P2 - Playback at 2x speed (e.g. P0.5, P2)          |
-|                                                       |
-|  FILE OPERATIONS                                      |
-|    S  - Save current recording                        |
-|    L  - Load recording from file                      |
-|    l  - List saved recordings                         |
-|                                                       |
-|    q  - Quit                                          |
+|  h - Help          q - Quit                           |
 +-------------------------------------------------------+
+Prompt shows: [--]=disconnected [M]=motors [G]=gravity [Z]=sleep
 """
 
     print(menu)
 
     while True:
         try:
-            cmd = input("\n> ").strip()
+            # State indicator
+            ind = {
+                RobotState.DISCONNECTED: "--",
+                RobotState.MOTORS_ENABLED: "M",
+                RobotState.GRAVITY_COMP: "G",
+                RobotState.MOTORS_DISABLED: "O",
+                RobotState.SLEEPING: "Z",
+            }.get(recorder.state, "?")
+
+            cmd = input(f"\n[{ind}]> ").strip()
 
             if not cmd:
                 continue
@@ -437,33 +458,29 @@ def interactive_menu():
             elif cmd == "p":
                 recorder.get_current_pose()
 
-            # Recording
-            elif cmd == "r":
-                if recorder.is_recording:
-                    recorder.stop_recording()
-                else:
-                    recorder.start_recording()
-                    input("Press Enter to stop recording...")
-                    recorder.stop_recording()
-
-            elif cmd.startswith("R"):
-                # Manual recording with optional duration
+            # Recording (R, R5, R10, R30, etc.)
+            elif cmd.upper().startswith("R"):
                 duration = 5.0
                 if len(cmd) > 1:
                     try:
                         duration = float(cmd[1:])
-                    except:
-                        pass
-                recorder.manual_record(duration=duration)
+                        if duration <= 0 or duration > 300:
+                            print("ERROR: Duration must be 1-300 seconds.")
+                            continue
+                    except ValueError:
+                        print("ERROR: Use R, R5, R10, R30, etc.")
+                        continue
+                recorder.record(duration=duration)
 
-            # Playback
-            elif cmd.startswith("P"):
+            # Playback (P, P2, P0.5, etc.)
+            elif cmd.upper().startswith("P"):
                 speed = 1.0
                 if len(cmd) > 1:
                     try:
                         speed = float(cmd[1:])
-                    except:
-                        pass
+                    except ValueError:
+                        print("ERROR: Use P, P2, P0.5, etc.")
+                        continue
                 recorder.playback(speed=speed)
 
             # File operations
@@ -472,20 +489,20 @@ def interactive_menu():
 
             elif cmd == "L":
                 recorder.list_recordings()
-                filename = input("Enter filename to load: ").strip()
+                filename = input("Filename: ").strip()
                 if filename:
                     recorder.load_recording(filename)
 
             elif cmd == "l":
                 recorder.list_recordings()
 
+            elif cmd in ("h", "?"):
+                print(menu)
+
             elif cmd == "q":
                 print("Goodbye!")
                 recorder.disconnect()
                 break
-
-            elif cmd == "?":
-                print(menu)
 
             else:
                 print(f"Unknown command: {cmd}. Type ? for help.")
